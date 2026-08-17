@@ -1,6 +1,6 @@
 {
-    "name": "adf_trainer",
-    "short_name": "adf_trainer",
+    "name": "VOR trainer",
+    "short_name": "VOR trainer",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",

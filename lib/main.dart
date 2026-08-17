@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -13,14 +14,14 @@ class AdfTrainerApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'ADF Trainer',
+      title: 'VOR Trainer',
       theme: ThemeData(
         useMaterial3: true,
       ),
       home: Scaffold(
         backgroundColor: const Color(0xFFEAF5FB),
         appBar: AppBar(
-          title: const Text('ADF Trainer'),
+          title: const Text('VOR Trainer'),
         ),
         body: const NavigationBoard(),
       ),
@@ -36,12 +37,18 @@ class NavigationBoard extends StatefulWidget {
 }
 
 class _NavigationBoardState extends State<NavigationBoard> {
-  // aircraftPosition anger nu flygplanets CENTRUM.
+
   Offset aircraftPosition = const Offset(250, 250);
 
   double heading = 90;
+  double selectedCourse = 0;
+  bool isFlying = false;
+  Timer? flightTimer;
+  double aircraftSpeed = 20.0;
+  double currentBoardSize = 0;
 
   static const double aircraftSize = 50;
+  static const double pixelsPerNm = 30.0;
 
   double normalize360(double value) {
     value %= 360;
@@ -53,32 +60,193 @@ class _NavigationBoardState extends State<NavigationBoard> {
     return value;
   }
 
-  double calculateQdm({
+double calculateCdiDeviation({
+  required double radial,
+  required double selectedCourse,
+}) {
+  double difference =
+      (radial - selectedCourse + 540) % 360 - 180;
+
+  if (difference > 90) {
+    difference -= 180;
+  } else if (difference < -90) {
+    difference += 180;
+  }
+
+  if (!difference.isFinite) {
+    return 0.0;
+  }
+
+  return difference;
+}
+
+double calculateCdiDots({
+  required double cdiDeviation,
+  required String toFrom,
+}) {
+  if (toFrom == 'OFF') {
+    return 0.0;
+  }
+
+  // Needle indication must reverse between TO and FROM
+  // because the selected course direction is reversed.
+  final sensedDeviation =
+      toFrom == 'FROM'
+          ? -cdiDeviation
+          : cdiDeviation;
+
+ if (!sensedDeviation.isFinite) {
+    return 0.0;
+  }
+
+
+
+  // VOR: approximately 2 degrees per dot.
+  final dots = sensedDeviation / 2.0;
+
+  if (!dots.isFinite) {
+    return 0.0;
+  }
+
+  // Limit the display to five dots either side.
+  return dots.clamp(-5.0, 5.0).toDouble();
+}
+
+  double calculateRadial({
     required Offset aircraftCenter,
-    required Offset beaconCenter,
+    required Offset vorCenter,
   }) {
-    final dx = beaconCenter.dx - aircraftCenter.dx;
-    final dy = beaconCenter.dy - aircraftCenter.dy;
+    final dx = aircraftCenter.dx - vorCenter.dx;
+    final dy = aircraftCenter.dy - vorCenter.dy;
 
-    final angle = math.atan2(dx, -dy) * 180 / math.pi;
+    var angle =
+        math.atan2(dx, -dy) * 180 / math.pi;
 
-    return normalize360(angle);
+    if (angle < 0) {
+      angle += 360;
+    }
+
+    return angle;
   }
 
-  double calculateQdr(double qdm) {
-    return normalize360(qdm + 180);
+double calculateDme({
+  required Offset aircraftCenter,
+  required Offset vorCenter,
+}) {
+  final dx = aircraftCenter.dx - vorCenter.dx;
+  final dy = aircraftCenter.dy - vorCenter.dy;
+
+  final distancePixels = math.sqrt(
+    dx * dx + dy * dy,
+  );
+
+  return distancePixels / pixelsPerNm;
+}
+
+
+
+void startFlying() {
+  if (isFlying) return;
+
+  setState(() {
+    isFlying = true;
+  });
+
+  const intervalMilliseconds = 50;
+
+  flightTimer = Timer.periodic(
+    const Duration(milliseconds: intervalMilliseconds),
+    (timer) {
+      setState(() {
+        final headingRad = heading * math.pi / 180;
+
+        final distance =
+            aircraftSpeed * intervalMilliseconds / 1000;
+
+        final dx = math.sin(headingRad) * distance;
+        final dy = -math.cos(headingRad) * distance;
+
+        final newX = aircraftPosition.dx + dx;
+        final newY = aircraftPosition.dy + dy;
+
+        final minX = aircraftSize / 2;
+        final maxX = currentBoardSize - aircraftSize / 2;
+
+        final minY = aircraftSize / 2;
+        final maxY = currentBoardSize - aircraftSize / 2;
+
+        final clampedX =
+            newX.clamp(minX, maxX).toDouble();
+
+        final clampedY =
+            newY.clamp(minY, maxY).toDouble();
+
+        aircraftPosition = Offset(
+          clampedX,
+          clampedY,
+        );
+
+        // Stoppa när flygplanet når kanten.
+        if (clampedX != newX || clampedY != newY) {
+          flightTimer?.cancel();
+          flightTimer = null;
+          isFlying = false;
+        }
+      });
+    },
+  );
+}
+
+void stopFlying() {
+  flightTimer?.cancel();
+  flightTimer = null;
+
+  setState(() {
+    isFlying = false;
+  });
+}
+
+@override
+void dispose() {
+  flightTimer?.cancel();
+  super.dispose();
+}
+
+String calculateToFrom({
+  required double radial,
+  required double selectedCourse,
+  required double dme,
+}) {
+  // Osäker zon nära VOR-stationen.
+  const double stationPassageZone = 0.5; // NM
+
+  if (dme < stationPassageZone) {
+    return 'OFF';
   }
 
-  double calculateRelativeBearing({
-    required double qdm,
-    required double heading,
-  }) {
-    return normalize360(qdm - heading);
+  double difference =
+      (selectedCourse - radial + 540) % 360 - 180;
+
+  final absDifference = difference.abs();
+
+  // Osäkerhet nära TO/FROM-gränsen.
+  const double ambiguity = 1.0;
+
+  if ((absDifference - 90).abs() <= ambiguity) {
+    return 'OFF';
   }
+
+  if (absDifference < 90) {
+    return 'FROM';
+  }
+
+  return 'TO';
+}
 
   String formatBearing(double value) {
     return value.round().toString().padLeft(3, '0');
   }
+
 
   @override
   Widget build(BuildContext context) {
@@ -97,6 +265,8 @@ class _NavigationBoardState extends State<NavigationBoard> {
                 (availableHeight - 85) * 0.95,
               );
 
+              currentBoardSize = boardSize;
+
               final beaconCenter = Offset(
                 boardSize / 2,
                 boardSize / 2,
@@ -105,17 +275,30 @@ class _NavigationBoardState extends State<NavigationBoard> {
               // aircraftPosition ÄR flygplanets centrum.
               final aircraftCenter = aircraftPosition;
 
-              final qdm = calculateQdm(
-                aircraftCenter: aircraftCenter,
-                beaconCenter: beaconCenter,
-              );
 
-              final qdr = calculateQdr(qdm);
+              final radial = calculateRadial(aircraftCenter: aircraftCenter, 
+              vorCenter: beaconCenter,);
 
-              final relativeBearing = calculateRelativeBearing(
-                qdm: qdm,
-                heading: heading,
-              );
+
+final dme = calculateDme(
+  aircraftCenter: aircraftCenter,
+  vorCenter: beaconCenter,
+);
+
+final toFrom = calculateToFrom(   radial: radial,   
+selectedCourse: selectedCourse,
+dme: dme,
+);
+
+final cdiDeviation = calculateCdiDeviation(
+  radial: radial,
+  selectedCourse: selectedCourse,
+);
+
+final cdiDots = calculateCdiDots(
+  cdiDeviation: cdiDeviation,
+  toFrom: toFrom,
+);
 
               return Column(
                 children: [
@@ -123,11 +306,13 @@ class _NavigationBoardState extends State<NavigationBoard> {
 
                   // Informationspanelen ligger nu UTANFÖR
                   // själva kompassrosens Stack.
-                  NavigationDataPanel(
+                  VorDataPanel(
                     heading: heading,
-                    relativeBearing: relativeBearing,
-                    qdm: qdm,
-                    qdr: qdr,
+                    radial: radial,
+                    selectedCourse: selectedCourse, 
+                    toFrom: toFrom,
+                    cdiDeviation: cdiDeviation,
+                    cdiDots: cdiDots,
                   ),
 
                   const SizedBox(height: 8),
@@ -149,6 +334,16 @@ class _NavigationBoardState extends State<NavigationBoard> {
                                 ),
                               ),
                             ),
+
+    // NYTT: OBS-kurslinjen
+    Positioned.fill(
+      child: CustomPaint(
+        painter: ObsCoursePainter(
+          vorCenter: beaconCenter,
+          selectedCourse: selectedCourse,
+        ),
+      ),
+    ),
 
                             // Flygplanet
                             Positioned(
@@ -198,11 +393,11 @@ class _NavigationBoardState extends State<NavigationBoard> {
                               ),
                             ),
 
-                            // NDB-fyren
+                            // VOR-stationen
                             Positioned(
                               left: beaconCenter.dx - 45,
                               top: beaconCenter.dy - 45,
-                              child: const NdbBeacon(
+                              child: const VorStation(
                                 size: 90,
                               ),
                             ),
@@ -266,6 +461,62 @@ class _NavigationBoardState extends State<NavigationBoard> {
                   Text('359°'),
                 ],
               ),
+
+const SizedBox(height: 12),
+
+ElevatedButton.icon(
+  onPressed: () {
+    if (isFlying) {
+      stopFlying();
+    } else {
+      startFlying();
+    }
+  },
+  icon: Icon(
+    isFlying
+        ? Icons.pause
+        : Icons.play_arrow,
+  ),
+  label: Text(
+    isFlying ? 'Pause' : 'Play',
+  ),
+),
+
+const SizedBox(height: 12),
+
+const SizedBox(height: 16),
+
+Text(
+  'OBS Course: ${formatBearing(selectedCourse)}°',
+  style: const TextStyle(
+    fontSize: 20,
+    fontWeight: FontWeight.bold,
+  ),
+),
+
+Slider(
+  value: selectedCourse,
+  min: 0,
+  max: 359,
+  divisions: 359,
+  label: '${formatBearing(selectedCourse)}°',
+  onChanged: (value) {
+    setState(() {
+      selectedCourse = value;
+    });
+  },
+),
+
+const Row(
+  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+  children: [
+    Text('000°'),
+    Text('090°'),
+    Text('180°'),
+    Text('270°'),
+    Text('359°'),
+  ],
+),
 
               const SizedBox(height: 10),
 
@@ -396,10 +647,10 @@ class Aircraft extends StatelessWidget {
   }
 }
 
-class NdbBeacon extends StatelessWidget {
+class VorStation extends StatelessWidget {
   final double size;
 
-  const NdbBeacon({
+  const VorStation({
     super.key,
     required this.size,
   });
@@ -408,67 +659,169 @@ class NdbBeacon extends StatelessWidget {
   Widget build(BuildContext context) {
     return CustomPaint(
       size: Size.square(size),
-      painter: NdbBeaconPainter(),
+      painter: VorStationPainter(),
     );
   }
 }
 
-class NdbBeaconPainter extends CustomPainter {
+class ObsCoursePainter extends CustomPainter {
+  final Offset vorCenter;
+  final double selectedCourse;
+
+  ObsCoursePainter({
+    required this.vorCenter,
+    required this.selectedCourse,
+  });
+
   @override
-  void paint(
-    Canvas canvas,
-    Size size,
-  ) {
+  void paint(Canvas canvas, Size size) {
+    final courseRad = selectedCourse * math.pi / 180;
+
+    // I skärmkoordinater är +y nedåt.
+    // 000° = upp
+    // 090° = höger
+    final dx = math.sin(courseRad);
+    final dy = -math.cos(courseRad);
+
+    // Samma ungefärliga radie som kompassrosen.
+    final radius =
+        math.min(size.width, size.height) / 2 * 0.76;
+
+    // Vald kursriktning.
+    final forward = Offset(
+      vorCenter.dx + dx * radius,
+      vorCenter.dy + dy * radius,
+    );
+
+    // Reciproka riktningen, 180° åt andra hållet.
+    final backward = Offset(
+      vorCenter.dx - dx * radius,
+      vorCenter.dy - dy * radius,
+    );
+
+    // Rita OBS-kurslinjen.
+    final linePaint = Paint()
+      ..color = Colors.deepPurple.withValues(alpha: 0.55)
+      ..strokeWidth = 2
+      ..style = PaintingStyle.stroke;
+
+    canvas.drawLine(
+      backward,
+      forward,
+      linePaint,
+    );
+
+    // -------------------------------------------------
+    // PIL PÅ DEN RECIPROKA SIDAN
+    // -------------------------------------------------
+
+    // Pilen ska peka från VOR ut mot reciprocal course.
+    final arrowDx = dx;
+    final arrowDy = dy;
+
+    // Placera pilspetsen ganska nära kompassrosen.
+    final arrowDistance = radius * 0.90;
+
+    final arrowTip = Offset(
+      vorCenter.dx + arrowDx * arrowDistance,
+      vorCenter.dy + arrowDy * arrowDistance,
+    );
+
+    // Pilens storlek.
+    const double arrowLength = 22.0;
+    const double arrowWidth = 16.0;
+
+    // Punkten där pilhuvudets bakre kant ligger.
+    final arrowBaseCenter = Offset(
+      arrowTip.dx - arrowDx * arrowLength,
+      arrowTip.dy - arrowDy * arrowLength,
+    );
+
+    // Vinkelrät vektor för pilens bredd.
+    final perpX = -arrowDy;
+    final perpY = arrowDx;
+
+    final arrowLeft = Offset(
+      arrowBaseCenter.dx + perpX * arrowWidth / 2,
+      arrowBaseCenter.dy + perpY * arrowWidth / 2,
+    );
+
+    final arrowRight = Offset(
+      arrowBaseCenter.dx - perpX * arrowWidth / 2,
+      arrowBaseCenter.dy - perpY * arrowWidth / 2,
+    );
+
+    final arrowPath = Path()
+      ..moveTo(arrowTip.dx, arrowTip.dy)
+      ..lineTo(arrowLeft.dx, arrowLeft.dy)
+      ..lineTo(arrowRight.dx, arrowRight.dy)
+      ..close();
+
+    final arrowPaint = Paint()
+      ..color = Colors.deepPurple
+      ..style = PaintingStyle.fill;
+
+    canvas.drawPath(
+      arrowPath,
+      arrowPaint,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant ObsCoursePainter oldDelegate) {
+    return oldDelegate.selectedCourse != selectedCourse ||
+        oldDelegate.vorCenter != vorCenter;
+  }
+}
+class VorStationPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
     final center = Offset(
       size.width / 2,
       size.height / 2,
     );
 
-    final linePaint = Paint()
+    final paint = Paint()
+      ..color = Colors.black
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 2
-      ..color = Colors.black;
+      ..strokeWidth = 2;
 
     final dotPaint = Paint()
-      ..style = PaintingStyle.fill
-      ..color = Colors.black;
+      ..color = Colors.black
+      ..style = PaintingStyle.fill;
 
-    final innerRadius = size.width * 0.22;
+    final r = size.width * 0.26;
+
+    // Enkel sexhörning som VOR-symbol
+    final path = Path();
+
+    for (int i = 0; i < 6; i++) {
+      final angle = (-90 + i * 60) * math.pi / 180;
+
+      final p = Offset(
+        center.dx + r * math.cos(angle),
+        center.dy + r * math.sin(angle),
+      );
+
+      if (i == 0) {
+        path.moveTo(p.dx, p.dy);
+      } else {
+        path.lineTo(p.dx, p.dy);
+      }
+    }
+
+    path.close();
+    canvas.drawPath(path, paint);
 
     canvas.drawCircle(
       center,
-      innerRadius,
-      linePaint,
-    );
-
-    canvas.drawCircle(
-      center,
-      size.width * 0.045,
+      size.width * 0.04,
       dotPaint,
     );
 
-    final ringRadius = size.width * 0.34;
-
-    const dotCount = 24;
-
-    for (int i = 0; i < dotCount; i++) {
-      final angle = 2 * math.pi * i / dotCount;
-
-      final dotCenter = Offset(
-        center.dx + ringRadius * math.cos(angle),
-        center.dy + ringRadius * math.sin(angle),
-      );
-
-      canvas.drawCircle(
-        dotCenter,
-        size.width * 0.028,
-        dotPaint,
-      );
-    }
-
     final textPainter = TextPainter(
       text: const TextSpan(
-        text: 'NDB',
+        text: 'VOR',
         style: TextStyle(
           color: Colors.black,
           fontSize: 14,
@@ -489,11 +842,29 @@ class NdbBeaconPainter extends CustomPainter {
     );
   }
 
+double calculateRadial({
+  required Offset aircraftCenter,
+  required Offset vorCenter,
+}) {
+  final dx = aircraftCenter.dx - vorCenter.dx;
+  final dy = aircraftCenter.dy - vorCenter.dy;
+
+  var angle =
+      math.atan2(dx, -dy) * 180 / math.pi;
+
+  if (angle < 0) {
+    angle += 360;
+  }
+
+  return angle;
+}
+
   @override
   bool shouldRepaint(
     covariant CustomPainter oldDelegate,
-  ) =>
-      false;
+  ) {
+    return false;
+  }
 }
 
 class NavigationPainter extends CustomPainter {
@@ -881,5 +1252,197 @@ class AircraftPainter extends CustomPainter {
     covariant CustomPainter oldDelegate,
   ) {
     return false;
+  }
+}
+
+class VorDataPanel extends StatelessWidget {
+  final double heading;
+  final double radial;
+  final double selectedCourse;
+  final String toFrom;
+  final double cdiDeviation;
+  final double cdiDots;
+
+  const VorDataPanel({
+    super.key,
+    required this.heading,
+    required this.radial,
+    required this.selectedCourse,
+    required this.toFrom,
+    required this.cdiDeviation,
+    required this.cdiDots,
+  });
+
+  String f(double value) {
+    return value.round().toString().padLeft(3, '0');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: 16,
+        vertical: 10,
+      ),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.94),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: Colors.grey.shade300,
+        ),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'HDG ${f(heading)}°',
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(width: 28),
+              Text(
+                'RADIAL ${f(radial)}°',
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 6),
+
+Text(
+  'CDI ${cdiDeviation.toStringAsFixed(1)}°',
+  style: const TextStyle(
+    fontSize: 16,
+    fontWeight: FontWeight.bold,
+  ),
+),
+
+const SizedBox(height: 8),
+
+CdiIndicator(
+  dots: cdiDots,
+  off: toFrom == 'OFF',
+),
+
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'OBS ${f(selectedCourse)}°',
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(width: 28),
+              Text(
+                toFrom,
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class CdiIndicator extends StatelessWidget {
+  final double dots;
+  final bool off;
+
+  const CdiIndicator({
+    super.key,
+    required this.dots,
+    required this.off,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    const double width = 240;
+    const double height = 42;
+
+    return SizedBox(
+      width: width,
+      height: height,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          const double margin = 10;
+
+          final usableWidth =
+              constraints.maxWidth - 2 * margin;
+
+          // 11 punkter ger 10 intervall.
+          final dotSpacing = usableWidth / 10;
+
+          final centerX =
+              margin + 5 * dotSpacing;
+
+final safeDots = dots.isFinite ? dots : 0.0;
+          final needleX =
+              centerX + safeDots * dotSpacing;
+
+          return Stack(
+            children: [
+              // De 11 CDI-punkterna
+              for (int index = 0; index < 11; index++)
+                Positioned(
+                  left: margin +
+                      index * dotSpacing -
+                      (index == 5 ? 5 : 2.5),
+                  top: height / 2 -
+                      (index == 5 ? 5 : 2.5),
+                  child: Container(
+                    width: index == 5 ? 10 : 5,
+                    height: index == 5 ? 10 : 5,
+                    decoration: BoxDecoration(
+                      color: index == 5
+                          ? Colors.black
+                          : Colors.black54,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                ),
+
+              // CDI-nålen
+              if (!off)
+                Positioned(
+                  left: needleX - 1.5,
+                  top: 4,
+                  child: Container(
+                    width: 3,
+                    height: 34,
+                    color: Colors.deepPurple,
+                  ),
+                ),
+
+              // OFF-flagga
+              if (off)
+                const Positioned(
+                  right: 0,
+                  top: 0,
+                  child: Text(
+                    'OFF',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+            ],
+          );
+        },
+      ),
+    );
   }
 }
